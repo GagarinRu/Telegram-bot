@@ -135,5 +135,6 @@ def main():
         finally:
             time.sleep(RETRY_PERIOD)
 
+
 if __name__ == '__main__':
     main()
