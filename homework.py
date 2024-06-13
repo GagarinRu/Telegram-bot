@@ -2,14 +2,14 @@ import logging
 import os
 import time
 from http import HTTPStatus
+from logging.handlers import RotatingFileHandler
 
 import requests
 from dotenv import load_dotenv
-from logging.handlers import RotatingFileHandler
 from telebot import TeleBot
 
 from constans import RETRY_PERIOD, ENDPOINT, HOMEWORK_VERDICTS, HEADERS
-
+from exception import InvalidResponseCode
 
 load_dotenv()
 
@@ -19,24 +19,37 @@ TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 handler = RotatingFileHandler(
-    'my_logger.log',
+    __file__ + '.log',
     maxBytes=50000000,
     backupCount=5,
     encoding='UTF-8'
 )
+
 logger.addHandler(handler)
 formatter = logging.Formatter(
-    '%(asctime)s - %(levelname)s - %(message)s'
+    '%(asctime)s, %(levelname)s, line %(lineno)s, '
+    'in %(funcName)s, %(message)s'
 )
 handler.setFormatter(formatter)
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 
 def check_tokens():
     """Доступность переменных окружения."""
-    variables = (PRACTICUM_TOKEN, TELEGRAM_TOKEN, TELEGRAM_CHAT_ID)
-    logger.info(f'токены: {variables}')
-    if None in variables:
-        logger.critical('Отсутствует токен.')
+    variables = (
+        ('PRACTICUM_TOKEN', PRACTICUM_TOKEN),
+        ('TELEGRAM_TOKEN', TELEGRAM_TOKEN),
+        ('TELEGRAM_CHAT_ID', TELEGRAM_CHAT_ID)
+    )
+    check_bool = True
+    for name, token in variables:
+        if token is None:
+            check_bool = False
+            logger.critical(f'Отсутствует {name}.')
+    if check_bool is False:
         raise KeyError('Не найден токен.')
 
 
@@ -47,54 +60,55 @@ def send_message(bot, message):
             chat_id=TELEGRAM_CHAT_ID,
             text=message
         )
-        logging.debug(f'Бот отправил сообщение: "{message}')
     except Exception as error:
-        logger.error(f'Ошибка {error}.Сбой в отправке сообщения:{message}.')
-        raise RuntimeError(
-            'Ошибка {error}.Сбой в отправки сообщения:{message}.'
-        )
+        logger.error(f'Ошибка {error}.{message}.')
+        return False
+    logging.debug(f'Бот отправил сообщение: "{message}')
+    return True
 
 
 def get_api_answer(timestamp):
     """Запрос к URL API-сервиса."""
+    payload = {'from_date': timestamp}
+    requests_variables = {
+        'url': ENDPOINT,
+        'headers': HEADERS,
+        'params': payload
+    }
+    logger.info(
+        'Запрос: {url}, {headers}, {params}'
+        .format(**requests_variables)
+    )
     try:
-        payload = {'from_date': timestamp}
-        logger.info(f'Запрос: {ENDPOINT}, {HEADERS}, {payload}')
-        response = requests.get(
-            ENDPOINT,
-            headers=HEADERS,
-            params=payload
+        response = requests.get(**requests_variables)
+    except requests.RequestException as error:
+        raise ConnectionError(
+            'Ошибка при запросе к API: {error}.'
+            'Данные:{url}, {headers}, {params}'
+            .format(**requests_variables, error=error)
         )
-        logger.info(f'Отправка запроса {response}.')
-    except Exception as error:
-        logger.error(f'Ошибка при запросе к API: {error}.')
     if response.status_code != HTTPStatus.OK:
-        logger.error(f'Код запроса {ENDPOINT} не 200.')
-        raise ValueError(f'{ENDPOINT} ошибка.')
+        raise InvalidResponseCode(
+            f'Код запроса: {response.status_code}'
+            f'Описание кода запроса: {response.reason}'
+            f'Текст кода: {response.text}'
+        )
+    logger.info(f'Отправка запроса {response}.')
     return response.json()
 
 
 def check_response(response):
     """Соответствие документации ответа API."""
-    check_list = (
-        ('homeworks', list),
-        ('current_date', int)
-    )
-    logger.info(f'Полученные данные: {response}.')
     if not isinstance(response, dict):
-        logger.error('Ошибка типа данных при запросе к API.')
         raise TypeError('Тип данных ответа API не соответствуют документации.')
-    for count, type in check_list:
-        if count not in response:
-            logger.error(f'Ошибка наличия {count} при запросе к API.')
-            raise KeyError('Данные отсутствуют при ответе API.')
-        elif not isinstance(response[count], type):
-            logger.error(f'Запрос к API. Ошибка типа данных({count}, {type}).')
-            raise TypeError(
-                'Тип данных ответа API не соответствуют документации.'
-            )
-        elif not response[count]:
-            raise IndexError('homeworks list is empty.')
+    if 'homeworks' not in response:
+        raise KeyError('Данные отсутствуют при ответе API.')
+    homeworks = response['homeworks']
+    if not isinstance(homeworks, list):
+        raise TypeError(
+            'Тип данных ответа API не соответствуют документации.'
+        )
+    return homeworks
 
 
 def parse_status(homework):
@@ -102,12 +116,12 @@ def parse_status(homework):
     logger.info(f'Полученные данные: {homework}.')
     if 'status' not in homework or 'homework_name' not in homework:
         logger.error('Ошибка наличия данных в homework.')
-        raise TypeError('Данные отсутствуют в homework.')
+        raise KeyError('Данные отсутствуют в homework.')
     homework_name = homework['homework_name']
     status_work = homework['status']
     if status_work not in HOMEWORK_VERDICTS:
         logger.error(f'Неизвестный статус работы: {status_work}.')
-        raise TypeError(f'Неизвестный статус работы: {status_work}.')
+        raise ValueError(f'Неизвестный статус работы: {status_work}.')
     verdict = HOMEWORK_VERDICTS[status_work]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
 
@@ -121,17 +135,21 @@ def main():
     while True:
         try:
             response = get_api_answer(timestamp)
-            check_response(response)
+            logger.info('Запрос API оттправлен')
+            homeworks = check_response(response)
+            if not homeworks:
+                logging.debug('Список homeworks пустой.')
+                continue
             current_work = response['homeworks'][0]
-            current_status = current_work['status']
-            if last_status != current_status:
-                last_status = current_status
-                send_message(bot, parse_status(current_work))
-            timestamp = response.get('current_date', timestamp)
+            verdict = parse_status(current_work)
+            if last_status != verdict and send_message(bot, verdict):
+                last_status = verdict
+                timestamp = response.get('current_date', timestamp)
         except Exception as error:
             message = f'Сбой в работе программы: {error}'
-            send_message(bot, message)
             logger.error(f'{message}')
+            if last_status != message and send_message(bot, message):
+                last_status = message
         finally:
             time.sleep(RETRY_PERIOD)
 
