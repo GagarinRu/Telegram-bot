@@ -46,7 +46,7 @@ def check_tokens():
     )
     check_bool = True
     for name, token in variables:
-        if token is None:
+        if not token:
             check_bool = False
             logger.critical(f'Отсутствует {name}.')
     if check_bool is False:
@@ -113,14 +113,14 @@ def check_response(response):
 
 def parse_status(homework):
     """Извлечение информации о статусе последней работы."""
-    logger.info(f'Полученные данные: {homework}.')
+    logger.info(f'Полученные данные последней домашней работы: {homework}.')
     if 'status' not in homework or 'homework_name' not in homework:
-        logger.error('Ошибка наличия данных в homework.')
-        raise KeyError('Данные отсутствуют в homework.')
+        raise KeyError(
+            'Данные(status, homework_name) последней домашней работы '
+            'отсутствуют в homework.')
     homework_name = homework['homework_name']
     status_work = homework['status']
     if status_work not in HOMEWORK_VERDICTS:
-        logger.error(f'Неизвестный статус работы: {status_work}.')
         raise ValueError(f'Неизвестный статус работы: {status_work}.')
     verdict = HOMEWORK_VERDICTS[status_work]
     return f'Изменился статус проверки работы "{homework_name}". {verdict}'
